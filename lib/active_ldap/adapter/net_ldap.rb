@@ -151,7 +151,7 @@ module ActiveLdap
           message = result[:errorMessage]
           result = result[:resultCode]
         end
-        unless result.zero?
+        unless result.success?
           klass = LdapError::ERRORS[result]
           klass ||= LdapError
           return if klass == LdapError::SizeLimitExceeded
