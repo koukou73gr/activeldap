@@ -140,6 +140,8 @@ module ActiveLdap
       def read_external_file
         uri_string = @scanner.scan(URI::ABS_URI)
         raise uri_is_missing if uri_string.nil?
+        uri_string.chomp!
+
         uri = nil
         begin
           uri = URI.parse(uri_string)
@@ -439,6 +441,10 @@ module ActiveLdap
 
       def invalid_uri(uri_string, message)
         invalid_ldif(_("URI is invalid: %s: %s") % [uri_string, message])
+      end
+
+      def uri_is_missing
+        invalid_ldif(_("URI is missing"))
       end
 
       def modify_spec_separator_is_missing

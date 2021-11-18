@@ -2,7 +2,20 @@ module ActiveLdap
   module Validations
     extend ActiveSupport::Concern
     include ActiveModel::Validations
-    
+
+    module ClassMethods
+      def attribute_method?(attribute)
+        normalized_attribute = entry_attribute.normalize(attribute)
+        normalized_attribute and normalized_attribute != "objectClass"
+      end
+
+      private
+      def entry_attribute
+        @entry_attribute ||=
+          connection.entry_attribute(classes.collect(&:name))
+      end
+    end
+
     included do
       alias_method :new_record?, :new_entry?
       class << self
@@ -40,15 +53,23 @@ module ActiveLdap
       errors.empty? && output
     end
 
-    def save(*)
-      valid? ? super : false
+    def save(**options)
+      perform_validations(options) ? super : false
     end
 
-    def save!(*)
-      valid? ? super : raise(EntryInvalid.new(self))
+    def save!(**options)
+      perform_validations(options) ? super : raise(EntryInvalid.new(self))
     end
 
     private
+    def perform_validations(options)
+      if options[:validate] == false
+        true
+      else
+        valid?(options[:context])
+      end
+    end
+
     def format_validation_message(format, parameters)
       format % parameters
     end
@@ -147,7 +168,7 @@ module ActiveLdap
           next if required_attribute.read_only?
           next if _validation_skip_attributes.include?(real_name)
 
-          value = @data[real_name] || []
+          value = @data[real_name]
           next unless self.class.blank_value?(value)
 
           _schema ||= schema
@@ -171,6 +192,8 @@ module ActiveLdap
     def validate_ldap_values
       entry_attribute.schemata.each do |name, attribute|
         value = self[name]
+        # Is it really proper location for setting encoding?
+        attribute.apply_encoding(value)
         next if self.class.blank_value?(value)
         validate_ldap_value(attribute, name, value)
       end

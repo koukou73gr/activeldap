@@ -24,7 +24,7 @@ module ActiveLdap
         end
 
         class SSL < Base
-          def connect(host, port)
+          def connect(host, port, options={})
             LDAP::SSLConn.new(host, port, false)
           end
 
@@ -34,8 +34,35 @@ module ActiveLdap
         end
 
         class TLS < Base
-          def connect(host, port)
-            LDAP::SSLConn.new(host, port, true)
+          def connect(host, port, options={})
+            connection = LDAP::Conn.new(host, port)
+            if connection.get_option(LDAP::LDAP_OPT_PROTOCOL_VERSION) < 3
+              connection.set_option(LDAP::LDAP_OPT_PROTOCOL_VERSION, 3)
+            end
+            tls_options = options[:tls_options]
+            if tls_options and LDAP.const_defined?(:LDAP_OPT_X_TLS_NEWCTX)
+              tls_options.each do |key, value|
+                case key
+                when :verify_mode
+                  case value
+                  when :none, OpenSSL::SSL::SSL_VERIFY_NONE
+                    connection.set_option(LDAP::LDAP_OPT_X_TLS_REQUIRE_CERT,
+                                          LDAP::LDAP_OPT_X_TLS_NEVER)
+                  when :peer, OpenSSL::SSL::SSL_VERIFY_PEER
+                    connection.set_option(LDAP::LDAP_OPT_X_TLS_REQUIRE_CERT,
+                                          LDAP::LDAP_OPT_X_TLS_DEMAND)
+                  end
+                when :verify_hostname
+                  unless value
+                    connection.set_option(LDAP::LDAP_OPT_X_TLS_REQUIRE_CERT,
+                                          LDAP::LDAP_OPT_X_TLS_ALLOW)
+                  end
+                end
+              end
+              connection.set_option(LDAP::LDAP_OPT_X_TLS_NEWCTX, 0)
+            end
+            connection.start_tls
+            connection
           end
 
           def start_tls?
@@ -44,7 +71,7 @@ module ActiveLdap
         end
 
         class Plain < Base
-          def connect(host, port)
+          def connect(host, port, options={})
             LDAP::Conn.new(host, port)
           end
         end
@@ -54,9 +81,15 @@ module ActiveLdap
         super do |host, port, method|
           uri = construct_uri(host, port, method.ssl?)
           with_start_tls = method.start_tls?
-          info = {:uri => uri, :with_start_tls => with_start_tls}
-          [log("connect", info) {method.connect(host, port)},
-           uri, with_start_tls]
+          info = {
+            :uri => uri,
+            :with_start_tls => with_start_tls,
+            :tls_options => @tls_options,
+          }
+          connection = log("connect", info) do
+            method.connect(host, port, :tls_options => @tls_options)
+          end
+          [connection, uri, with_start_tls]
         end
       end
 
@@ -80,14 +113,11 @@ module ActiveLdap
       end
 
       def search(options={})
-        super(options) do |base, scope, filter, attrs, limit|
+        super(options) do |search_options|
           begin
-            info = {
-              :base => base, :scope => scope_name(scope),
-              :filter => filter, :attributes => attrs, :limit => limit,
-            }
-            execute(:search_with_limit,
-                    info, base, scope, filter, attrs, limit) do |entry|
+            scope = search_options[:scope]
+            info = search_options.merge(scope: scope_name(scope))
+            execute(:search_full, info, search_options) do |entry|
               attributes = {}
               entry.attrs.each do |attr|
                 value = entry.vals(attr)
@@ -98,7 +128,10 @@ module ActiveLdap
           rescue RuntimeError
             if $!.message == "no result returned by search"
               @logger.debug do
-                args = [filter, attrs.inspect]
+                args = [
+                  search_options[:filter],
+                  search_options[:attributes].inspect,
+                ]
                 _("No matches: filter: %s: attributes: %s") % args
               end
             else
@@ -152,7 +185,8 @@ module ActiveLdap
 
       def modify_rdn(dn, new_rdn, delete_old_rdn, new_superior, options={})
         super do |_dn, _new_rdn, _delete_old_rdn, _new_superior|
-          if _new_superior
+          rename_available_p = @connection.respond_to?(:rename)
+          if _new_superior and not rename_available_p
             raise NotImplemented.new(_("modify RDN with new superior"))
           end
           info = {
@@ -162,7 +196,12 @@ module ActiveLdap
             :new_superior => _new_superior,
             :delete_old_rdn => _delete_old_rdn
           }
-          execute(:modrdn, info, _dn, _new_rdn, _delete_old_rdn)
+          if rename_available_p
+            execute(:rename, info,
+                    _dn, _new_rdn, _new_superior, _delete_old_rdn, [], [])
+          else
+            execute(:modrdn, info, _dn, _new_rdn, _delete_old_rdn)
+          end
         end
       end
 
@@ -170,21 +209,22 @@ module ActiveLdap
       def prepare_connection(options={})
         operation(options) do
           @connection.set_option(LDAP::LDAP_OPT_PROTOCOL_VERSION, 3)
+          @ldap_follow_referrals = follow_referrals?(options) ? 1 : 0
+          @connection.set_option(LDAP::LDAP_OPT_REFERRALS,
+                                 @ldap_follow_referrals)
         end
       end
 
       def execute(method, info=nil, *args, &block)
         begin
           name = (info || {}).delete(:name) || method
+          @connection.set_option(LDAP::LDAP_OPT_REFERRALS,
+                                 @ldap_follow_referrals)
           log(name, info) {@connection.send(method, *args, &block)}
         rescue LDAP::ResultError
           @connection.assert_error_code
           raise $!.message
         end
-      end
-
-      def do_in_timeout(timeout, &block)
-        Timeout.timeout(timeout, &block)
       end
 
       def ensure_method(method)

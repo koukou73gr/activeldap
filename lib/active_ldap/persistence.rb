@@ -44,6 +44,7 @@ module ActiveLdap
       unless create_or_update
         raise EntryNotSaved, _("entry %s can't be saved") % dn
       end
+      true
     end
 
     def create_or_update
@@ -69,7 +70,7 @@ module ActiveLdap
           if old_dn_base == new_dn_base
             new_superior = nil
           else
-            new_superior = new_dn_base
+            new_superior = new_dn_base.to_s
           end
           modify_rdn_entry(@original_dn,
                            "#{dn_attribute}=#{DN.escape_value(new_dn_value)}",
@@ -80,9 +81,10 @@ module ActiveLdap
       end
     end
 
-    def reload
+    def reload(options={})
       clear_association_cache
-      _, attributes = search(:value => id).find do |_dn, _attributes|
+      search_options = options.merge(value: id)
+      _, attributes = search(search_options).find do |_dn, _attributes|
         dn == _dn
       end
       if attributes.nil?
@@ -90,7 +92,7 @@ module ActiveLdap
       end
 
       @ldap_data.update(attributes)
-      classes, attributes = extract_object_class(attributes)
+      classes = extract_object_class!(attributes)
       self.classes = classes
       self.attributes = attributes
       @new_entry = false

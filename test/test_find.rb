@@ -3,7 +3,18 @@ require 'al-test-utils'
 class TestFind < Test::Unit::TestCase
   include AlTestUtils
 
-  priority :must
+  def test_find_paged
+    page_size = 126
+    n_users = page_size + 1
+    uids = n_users.times.collect do
+      user, _password = make_temporary_user
+      user.uid
+    end
+    users = @user_class.find(:all, page_size: page_size)
+    assert_equal(uids.sort,
+                 users.collect(&:uid).sort)
+  end
+
   def test_find_with_dn
     make_temporary_user do |user,|
       assert_equal(user.dn, @user_class.find(user.dn).dn)
@@ -11,7 +22,6 @@ class TestFind < Test::Unit::TestCase
     end
   end
 
-  priority :normal
   def test_find_with_special_value_prefix
     # \2C == ','
     make_ou("a\\2Cb,ou=Users")
@@ -63,7 +73,8 @@ class TestFind < Test::Unit::TestCase
 
   def test_find_operational_attributes
     make_temporary_user do |user, password|
-      found_user = @user_class.find(user.uid, :attributes => ["*", "+"])
+      found_user = @user_class.find(user.uid,
+                                    :include_operational_attributes => true)
       assert_equal(Time.now.utc.iso8601,
                    found_user.modify_timestamp.utc.iso8601)
     end

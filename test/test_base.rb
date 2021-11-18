@@ -5,7 +5,52 @@ require 'al-test-utils'
 class TestBase < Test::Unit::TestCase
   include AlTestUtils
 
+  sub_test_case("follow_referrals") do
+    def test_default
+      make_temporary_user do |user1,|
+        make_temporary_user do |user2,|
+          member_url = ["ldap:///#{user1.base.to_s}??one?(objectClass=person)"]
+          make_temporary_group_of_urls(member_url: member_url) do |group_of_urls|
+            assert_equal([user1.dn, user2.dn],
+                         group_of_urls.attributes["member"])
+          end
+        end
+      end
+    end
+
+    def test_connection_false
+      omit_unless_jruby
+      @group_of_urls_class.setup_connection(
+        current_configuration.merge(follow_referrals: false)
+      )
+      make_temporary_user do |user1,|
+        make_temporary_user do |user2,|
+          member_url = ["ldap:///#{user1.base.to_s}??one?(objectClass=person)"]
+          make_temporary_group_of_urls(member_url: member_url) do |group_of_urls|
+            assert_nil(group_of_urls.attributes["member"])
+          end
+        end
+      end
+    end
+
+    def test_connect_false
+      omit_unless_jruby
+      connection = @group_of_urls_class.connection
+      connection.disconnect!
+      connection.connect(follow_referrals: false)
+      make_temporary_user do |user1,|
+        make_temporary_user do |user2,|
+          member_url = ["ldap:///#{user1.base.to_s}??one?(objectClass=person)"]
+          make_temporary_group_of_urls(member_url: member_url) do |group_of_urls|
+            assert_nil(group_of_urls.attributes["member"])
+          end
+        end
+      end
+    end
+  end
+
   priority :must
+  priority :normal
   def test_search_colon_value
     make_temporary_group(:cn => "temp:group") do |group|
       assert_equal("temp:group", group.cn)
@@ -13,7 +58,6 @@ class TestBase < Test::Unit::TestCase
     end
   end
 
-  priority :normal
   def test_lower_case_object_class
     fixture_file = fixture("lower_case_object_class_schema.rb")
     schema_entries = eval(File.read(fixture_file))
@@ -75,14 +119,6 @@ class TestBase < Test::Unit::TestCase
     end
   end
 
-  def test_not_rename_by_mass_update
-    make_temporary_user(:simple => true) do |user,|
-      original_id = user.id
-      assert_true(user.update_attributes(:id => "user2"))
-      assert_equal(original_id, user.id)
-    end
-  end
-
   def test_attributes
     make_temporary_group do |group|
       assert_equal({
@@ -98,22 +134,15 @@ class TestBase < Test::Unit::TestCase
     make_ou("sub,ou=users")
     make_temporary_user(:simple => true) do |user,|
       user.id = "user2,ou=sub,#{@user_class.base}"
-      case user.connection.class.to_s.demodulize
-      when "Jndi"
-        assert_true(user.save)
+      assert_true(user.save)
 
-        found_user = nil
-        assert_nothing_raised do
-          found_user = @user_class.find("user2")
-        end
-        base = @user_class.base
-        assert_equal("#{@user_class.dn_attribute}=user2,ou=sub,#{base}",
-                     found_user.dn.to_s)
-      else
-        assert_raise(ActiveLdap::NotImplemented) do
-          user.save
-        end
+      found_user = nil
+      assert_nothing_raised do
+        found_user = @user_class.find("user2")
       end
+      base = @user_class.base
+      assert_equal("#{@user_class.dn_attribute}=user2,ou=sub,#{base}",
+                   found_user.dn.to_s)
     end
   end
 
@@ -137,9 +166,9 @@ class TestBase < Test::Unit::TestCase
 
   def test_operational_attributes
     make_temporary_group do |group|
-      dn, attributes = @group_class.search(:attributes => ["*"])[0]
+      _dn, attributes = @group_class.search(:attributes => ["*"])[0]
       normal_attributes = attributes.keys
-      dn, attributes = @group_class.search(:attributes => ["*", "+"])[0]
+      _dn, attributes = @group_class.search(:attributes => ["*", "+"])[0]
       operational_attributes = attributes.keys - normal_attributes
       operational_attribute = operational_attributes[0]
 
@@ -165,13 +194,13 @@ class TestBase < Test::Unit::TestCase
     _ou_class.create("root2")
     assert_equal(["base",
                   "root1", "child1", "child2", "domain", "child3",
-                  "root2"],
-                 _entry_class.find(:all).collect(&:id))
+                  "root2"].sort,
+                 _entry_class.find(:all).collect(&:id).sort)
     assert_raise(ActiveLdap::DeleteError) do
       root1.destroy_all
     end
-    assert_equal(["base", "root1", "domain", "root2"],
-                 _entry_class.find(:all).collect(&:id))
+    assert_equal(["base", "root1", "domain", "root2"].sort,
+                 _entry_class.find(:all).collect(&:id).sort)
   end
 
   def test_delete_mixed_tree_by_instance
@@ -188,13 +217,13 @@ class TestBase < Test::Unit::TestCase
     _ou_class.create("root2")
     assert_equal(["base",
                   "root1", "child1", "child2", "domain", "child3",
-                  "root2"],
-                 _entry_class.find(:all).collect(&:id))
+                  "root2"].sort,
+                 _entry_class.find(:all).collect(&:id).sort)
     assert_raise(ActiveLdap::DeleteError) do
       root1.delete_all
     end
-    assert_equal(["base", "root1", "domain", "root2"],
-                 _entry_class.find(:all).collect(&:id))
+    assert_equal(["base", "root1", "domain", "root2"].sort,
+                 _entry_class.find(:all).collect(&:id).sort)
   end
 
   def test_delete_tree
@@ -204,8 +233,8 @@ class TestBase < Test::Unit::TestCase
     _ou_class.create(:ou => "child1", :parent => root1)
     _ou_class.create(:ou => "child2", :parent => root1)
     _ou_class.create("root2")
-    assert_equal(["base", "root1", "child1", "child2", "root2"],
-                 _ou_class.find(:all).collect(&:ou))
+    assert_equal(["base", "root1", "child1", "child2", "root2"].sort,
+                 _ou_class.find(:all).collect(&:ou).sort)
     _ou_class.delete_all(:base => root1.dn)
     assert_equal(["base", "root2"],
                  _ou_class.find(:all).collect(&:ou))
@@ -232,11 +261,11 @@ class TestBase < Test::Unit::TestCase
                              :classes => ["top"]
     entry_class.dn_attribute = nil
     assert_equal(["base", "root1", "child1", "domain1", "grandchild1",
-                  "child2", "domain2", "root2"],
-                 entry_class.find(:all).collect(&:id))
+                  "child2", "domain2", "root2"].sort,
+                 entry_class.find(:all).collect(&:id).sort)
     entry_class.delete_all(nil, :base => child2.dn)
-    assert_equal(["base", "root1", "child1", "domain1", "grandchild1", "root2"],
-                 entry_class.find(:all).collect(&:id))
+    assert_equal(["base", "root1", "child1", "domain1", "grandchild1", "root2"].sort,
+                 entry_class.find(:all).collect(&:id).sort)
   end
 
   def test_first
@@ -264,6 +293,94 @@ class TestBase < Test::Unit::TestCase
         assert_equal(user2, @user_class.last)
         assert_equal([user1, user2], @user_class.all)
       end
+    end
+  end
+
+  def test_set_single_valued_attribute_uses_replace
+    make_temporary_user(:simple => true) do |user,|
+      assert_not_nil(user.homeDirectory)
+      assert_not_equal("/home/foo", user.homeDirectory)
+
+      user.homeDirectory = "/home/foo"
+      assert_equal({
+                     :modified => true,
+                     :entries => [
+                       [
+                         :replace,
+                         "homeDirectory",
+                         {"homeDirectory" => ["/home/foo"]},
+                       ]
+                     ]
+                   },
+                   detect_modify(user) {user.save})
+      assert_equal("/home/foo", user.homeDirectory)
+    end
+  end
+
+  def test_set_attribute_uses_add_for_completely_new_value
+    make_temporary_user(:simple => true) do |user,|
+      assert_nil(user.description)
+
+      user.description = "x"
+      assert_equal({
+                     :modified => true,
+                     :entries => [
+                       [:add, "description", {"description" => ["x"]}],
+                     ],
+                   },
+                   detect_modify(user) {user.save})
+      assert_equal("x", user.description)
+    end
+  end
+
+  def test_set_attribute_uses_add_for_added_value
+    make_temporary_user(:simple => true) do |user,|
+      user.description = ["a", "b"]
+      assert(user.save)
+
+      user.description = ["a", "b", "c"]
+      assert_equal({
+                     :modified => true,
+                     :entries => [
+                       [:add, "description", {"description" => ["c"]}],
+                     ],
+                   },
+                   capture = detect_modify(user) {user.save})
+      assert_equal(["a", "b", "c"], user.description)
+    end
+  end
+
+  def test_set_attribute_uses_delete_for_deleted_value
+    make_temporary_user(:simple => true) do |user,|
+      user.description = ["a", "b", "c"]
+      assert(user.save)
+
+      user.description = ["a", "c"]
+      assert_equal({
+                     :modified => true,
+                     :entries => [
+                       [:delete, "description", {"description" => ["b"]}],
+                     ],
+                   },
+                   detect_modify(user) {user.save})
+      assert_equal(["a", "c"], user.description)
+    end
+  end
+
+  def test_set_attribute_uses_delete_for_unset_value
+    make_temporary_user(:simple => true) do |user,|
+      user.description = "x"
+      assert(user.save)
+
+      user.description = nil
+      assert_equal({
+                     :modified => true,
+                     :entries => [
+                       [:delete, "description", {"description" => ["x"]}],
+                     ],
+                   },
+                   detect_modify(user) {user.save})
+      assert_nil(user.description)
     end
   end
 
@@ -307,6 +424,19 @@ class TestBase < Test::Unit::TestCase
       assert_not_equal("ZZZ", user.cn)
       user.dn = "CN=ZZZ"
       assert_equal("ZZZ", user.cn)
+    end
+  end
+
+  def test_set_dn_with_unnormalized_dn_attribute_with_forward_slash
+    make_temporary_user do |user,|
+      new_dn = "uid=temp/user1,#{user.class.base}"
+      assert_not_equal(user.dn.to_s, new_dn)
+
+      user.uid = 'temp/user1'
+      assert_equal(user.dn.to_s, new_dn)
+
+      assert_true(user.save!)
+      assert_true(user.class.find(user.uid).update_attributes!(gidNumber: 100069))
     end
   end
 
@@ -369,14 +499,25 @@ class TestBase < Test::Unit::TestCase
 
   def test_save_with_changes
     make_temporary_user do |user, password|
+      cn = user.cn
       user.cn += "!!!"
-      assert_true(detect_modify(user) {user.save})
+      assert_equal({
+                     :modified => true,
+                     :entries => [
+                       [:replace, "cn", {"cn" => ["#{cn}!!!"]}],
+                     ],
+                   },
+                   detect_modify(user) {user.save})
     end
   end
 
   def test_save_without_changes
     make_temporary_user do |user, password|
-      assert_false(detect_modify(user) {user.save})
+      assert_equal({
+                     :modified => false,
+                     :entries => [],
+                   },
+                   detect_modify(user) {user.save})
     end
   end
 
@@ -678,6 +819,43 @@ class TestBase < Test::Unit::TestCase
     end
   end
 
+  class TestInstantiate < self
+    class Person < ActiveLdap::Base
+      ldap_mapping dn_attribute: "cn",
+                   prefix: "ou=People",
+                   scope: :one,
+                   classes: ["top", "person"]
+    end
+
+    class OrganizationalPerson < Person
+      ldap_mapping dn_attribute: "cn",
+                   prefix: "",
+                   classes: ["top", "person", "organizationalPerson"]
+    end
+
+    class ResidentialPerson < Person
+      ldap_mapping dn_attribute: "cn",
+                   prefix: "",
+                   classes: ["top", "person", "residentialPerson"]
+    end
+
+    def test_sub_class
+      make_ou("People")
+      residential_person = ResidentialPerson.new(cn: "John Doe",
+                                                 sn: "Doe",
+                                                 street: "123 Main Street",
+                                                 l: "Anytown")
+      residential_person.save!
+      organizational_person = OrganizationalPerson.new(cn: "Jane Smith",
+                                                       sn: "Smith",
+                                                       title: "General Manager")
+      organizational_person.save!
+      people = Person.all
+      assert_equal([ResidentialPerson, OrganizationalPerson],
+                   people.collect(&:class))
+    end
+  end
+
   def test_reload_of_not_exists_entry
     make_temporary_user do |user,|
       assert_nothing_raised do
@@ -824,9 +1002,10 @@ class TestBase < Test::Unit::TestCase
     ou_class.ldap_mapping(:dn_attribute => :ou,
                           :prefix => "",
                           :classes => ["top", "organizationalUnit"])
-    assert_equal(["ou=Groups,#{current_configuration['base']}",
+    assert_equal(["ou=GroupOfURLsSet,#{current_configuration['base']}",
+                  "ou=Groups,#{current_configuration['base']}",
                   "ou=Users,#{current_configuration['base']}"],
-                 ou_class.find(:all).collect(&:dn).sort)
+                 ou_class.find(:all).collect(&:dn).collect(&:to_s).sort)
   end
 
   def test_ldap_mapping_validation
@@ -1166,23 +1345,30 @@ EOX
 
   private
   def detect_modify(object)
-    modify_called = false
+    modify_called = nil
+    entries = nil
     singleton_class = class << object; self; end
     singleton_class.send(:define_method, :modify_entry) do |*args|
       dn, attributes, options = args
       options ||= {}
       modify_detector = Object.new
       modify_detector.instance_variable_set("@called", false)
+      modify_detector.instance_variable_set("@entries", [])
       def modify_detector.modify(dn, entries, options)
         @called = true
+        @entries = entries
       end
       options[:connection] = modify_detector
       result = super(dn, attributes, options)
       modify_called = modify_detector.instance_variable_get("@called")
+      entries = modify_detector.instance_variable_get("@entries")
       result
     end
     yield
-    modify_called
+    {
+      :modified => modify_called,
+      :entries => entries,
+    }
   end
 
   def assert_to_ldif(entry)

@@ -1,4 +1,3 @@
-require "rubygems"
 require "active_model"
 require "active_support/core_ext"
 
@@ -6,12 +5,6 @@ require "active_ldap/version"
 
 module ActiveLdap
   autoload :Command, "active_ldap/command"
-end
-
-if RUBY_PLATFORM.match('linux')
-  require 'active_ldap/timeout'
-else
-  require 'active_ldap/timeout_stub'
 end
 
 require 'active_ldap/get_text'
@@ -55,7 +48,7 @@ ActiveLdap::Base.class_eval do
   include ActiveLdap::Persistence
 
   include ActiveLdap::Associations
-  include ActiveModel::MassAssignmentSecurity
+  include ActiveModel::ForbiddenAttributesProtection
   include ActiveLdap::Attributes
   include ActiveLdap::AttributeMethods
   include ActiveLdap::AttributeMethods::BeforeTypeCast
@@ -83,3 +76,5 @@ ACTIVE_LDAP_CONNECTION_ADAPTERS.each do |adapter|
   require "active_ldap/adapter/#{adapter}"
 end
 
+require "active_ldap/entry"
+require "active_ldap/railtie" if defined?(Rails)

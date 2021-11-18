@@ -20,6 +20,10 @@ module ActiveLdap
         PRINTABLE_CHARACTER = /[#{printable_character_source}]/ #
         UNPRINTABLE_CHARACTER = /[^#{printable_character_source}]/ #
 
+        def binary?
+          false
+        end
+
         def type_cast(value)
           value
         end
@@ -187,10 +191,15 @@ module ActiveLdap
             fraction = match_data[-2]
             fraction = fraction.to_f if fraction
             time_zone = match_data[-1]
+            arguments = [
+              value, year, month, day, hour, minute, second, fraction, time_zone,
+              Time.now,
+            ]
+            if Time.method(:make_time).arity == 11
+              arguments[2, 0] = nil
+            end
             begin
-              Time.send(:make_time,
-                        year, month, day, hour, minute, second, fraction,
-                        time_zone, Time.now)
+              Time.send(:make_time, *arguments)
             rescue ArgumentError
               raise if year >= 1700
               out_of_range_messages = ["argument out of range",
@@ -213,7 +222,11 @@ module ActiveLdap
             if value.gmt?
               normalized_value + "Z"
             else
-              normalized_value + ("%+03d%02d" % value.gmtoff.divmod(3600))
+              # for timezones with non-zero minutes, such as IST which is +0530,
+              # divmod(3600) will give wrong value of 1800
+
+              offset = value.gmtoff / 60 # in minutes
+              normalized_value + ("%+03d%02d" % offset.divmod(60))
             end
           else
             value
@@ -273,6 +286,10 @@ module ActiveLdap
 
       class JPEG < Base
         SYNTAXES["1.3.6.1.4.1.1466.115.121.1.28"] = self
+
+        def binary?
+          true
+        end
 
         private
         def validate_normalized_value(value, original_value)
@@ -366,6 +383,19 @@ module ActiveLdap
         end
       end
 
+      class OctetString < Base
+        SYNTAXES["1.3.6.1.4.1.1466.115.121.1.40"] = self
+
+        def binary?
+          true
+        end
+
+        private
+        def validate_normalized_value(value, original_value)
+          nil
+        end
+      end
+
       class PostalAddress < Base
         SYNTAXES["1.3.6.1.4.1.1466.115.121.1.41"] = self
 
@@ -411,6 +441,36 @@ module ActiveLdap
           return nil if value.blank?
           super
         end
+      end
+
+      class ObjectSecurityDescriptor < OctetString
+        # @see http://tools.ietf.org/html/draft-armijo-ldap-syntax-00
+        #   Object-Security-Descriptor: 1.2.840.113556.1.4.907
+        #
+        #   Encoded as an Octet-String (OID 1.3.6.1.4.1.1466.115.121.1.40)
+        #
+        # @see http://msdn.microsoft.com/en-us/library/cc223229.aspx
+        #   String(NT-Sec-Desc) 1.2.840.113556.1.4.907
+        SYNTAXES["1.2.840.113556.1.4.907"] = self
+      end
+
+      class UnicodePwd < OctetString
+        # @see http://msdn.microsoft.com/en-us/library/cc220961.aspx
+        #   cn: Unicode-Pwd
+        #   ldapDisplayName: unicodePwd
+        #   attributeId: 1.2.840.113556.1.4.90
+        #   attributeSyntax: 2.5.5.10
+        #   omSyntax: 4
+        #   isSingleValued: TRUE
+        #   schemaIdGuid: bf9679e1-0de6-11d0-a285-00aa003049e2
+        #   systemOnly: FALSE
+        #   searchFlags: 0
+        #   systemFlags: FLAG_SCHEMA_BASE_OBJECT
+        #   schemaFlagsEx: FLAG_ATTR_IS_CRITICAL
+        #
+        # @see http://msdn.microsoft.com/en-us/library/cc223177.aspx
+        #   String(Octet) 2.5.5.10
+        SYNTAXES["1.2.840.113556.1.4.90"] = self
       end
     end
   end

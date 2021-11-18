@@ -22,9 +22,23 @@ module ActiveLdap
     end
 
     module Common
-      VALID_SEARCH_OPTIONS = [:attribute, :value, :filter, :prefix,
-                              :classes, :scope, :limit, :attributes,
-                              :sort_by, :order, :connection, :base, :offset]
+      VALID_SEARCH_OPTIONS = [
+        :attribute,
+        :value,
+        :filter,
+        :prefix,
+        :classes,
+        :scope,
+        :limit,
+        :attributes,
+        :sort_by,
+        :order,
+        :connection,
+        :base,
+        :offset,
+        :use_paged_results,
+        :page_size,
+      ]
 
       def search(options={}, &block)
         validate_search_options(options)
@@ -62,6 +76,8 @@ module ActiveLdap
           :attributes => requested_attributes,
           :sort_by => options[:sort_by] || sort_by,
           :order => options[:order] || order,
+          :use_paged_results => options[:use_paged_results],
+          :page_size => options[:page_size],
         }
         options[:connection] ||= connection
         values = []
@@ -96,10 +112,11 @@ module ActiveLdap
         }
 
         attribute = attr || ensure_search_attribute
+        escaped_value = DN.escape_value(value)
         options_for_non_leaf = {
           :attribute => attr,
           :value => value,
-          :prefix => ["#{attribute}=#{value}", prefix].compact.join(","),
+          :prefix => ["#{attribute}=#{escaped_value}", prefix].compact.join(","),
           :limit => 1,
           :scope => :base,
         }
@@ -291,6 +308,9 @@ module ActiveLdap
         offset = options.delete(:offset) || offset
         options[:attributes] = options.delete(:attributes) || ['*']
         options[:attributes] |= ['objectClass']
+        if options.delete(:include_operational_attributes)
+          options[:attributes] |= ["+"]
+        end
         results = search(options).collect do |dn, attrs|
           instantiate([dn, attrs, {:connection => options[:connection]}])
         end

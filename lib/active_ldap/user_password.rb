@@ -5,9 +5,11 @@ require 'digest/sha1'
 
 module ActiveLdap
   module UserPassword
+    include GetText
+
     module_function
     def valid?(password, hashed_password)
-      unless /^\{([A-Z][A-Z\d]+)\}/ =~ hashed_password
+      unless /^\{([A-Za-z][A-Za-z\d]+)\}/ =~ hashed_password
         # Plain text password
         return hashed_password == password
       end
@@ -37,10 +39,18 @@ module ActiveLdap
     end
 
     def extract_salt_for_crypt(crypted_password)
-      if /^\$1\$/ =~ crypted_password
-        $MATCH + $POSTMATCH[0, 8].sub(/\$.*/, '') + "$"
+      if /\A\$(?:1|5|6|2a)\$[a-zA-Z0-9.\/]{,16}\$/ =~ crypted_password
+        $MATCH
       else
-        crypted_password[0, 2]
+        salt = crypted_password[0, 2]
+        if salt.size != 2
+          raise ArgumentError, _("salt size must be 2: <%s>") % salt
+        end
+        unless /\A[a-zA-Z0-9.\/]{2}\z/ =~ salt
+          message = _("salt character must be [a-zA-Z0-9./]: <%s>") % salt
+          raise ArgumentError, message
+        end
+        salt
       end
     end
 
@@ -54,7 +64,7 @@ module ActiveLdap
       end
       salt ||= Salt.generate(4)
       md5_hash_with_salt = "#{Digest::MD5.digest(password + salt)}#{salt}"
-      "{SMD5}#{[md5_hash_with_salt].pack('m').chomp}"
+      "{SMD5}#{[md5_hash_with_salt].pack('m').gsub("\n", '')}"
     end
 
     def extract_salt_for_smd5(smd5ed_password)
@@ -71,7 +81,7 @@ module ActiveLdap
       end
       salt ||= Salt.generate(4)
       sha1_hash_with_salt = "#{Digest::SHA1.digest(password + salt)}#{salt}"
-      "{SSHA}#{[sha1_hash_with_salt].pack('m').chomp}"
+      "{SSHA}#{[sha1_hash_with_salt].pack('m').gsub("\n", '')}"
     end
 
     def extract_salt_for_ssha(sshaed_password)

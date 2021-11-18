@@ -26,15 +26,21 @@ module ActiveLdap
             :host => host,
             :port => port,
           }
-          config[:encryption] = {:method => method} if method
+          if method
+            config[:encryption] = { :method => method }
+            config[:encryption][:tls_options] = @tls_options if @tls_options
+          end
           begin
             uri = construct_uri(host, port, method == :simple_tls)
             with_start_tls = method == :start_tls
             info = {:uri => uri, :with_start_tls => with_start_tls}
             [log("connect", info) {Net::LDAP::Connection.new(config)},
              uri, with_start_tls]
-          rescue Net::LDAP::LdapError
-            raise ConnectionError, $!.message
+          rescue Net::LDAP::ConnectionError => error
+            raise ConnectionError, error.message
+          rescue Net::LDAP::Error => error
+            message = "#{error.class}: #{error.message}"
+            raise ConnectionError, message, caller(0) + error.backtrace
           end
         end
       end
@@ -50,7 +56,7 @@ module ActiveLdap
       def bind(options={})
         begin
           super
-        rescue Net::LDAP::LdapError
+        rescue Net::LDAP::Error
           raise AuthenticationError, $!.message
         end
       end
@@ -63,17 +69,16 @@ module ActiveLdap
       end
 
       def search(options={})
-        super(options) do |base, scope, filter, attrs, limit|
+        super(options) do |search_options|
+          scope = search_options[:scope]
+          info = search_options.merge(scope: scope_name(scope))
           args = {
-            :base => base,
-            :scope => scope,
-            :filter => filter,
-            :attributes => attrs,
-            :size => limit,
-          }
-          info = {
-            :base => base, :scope => scope_name(scope),
-            :filter => filter, :attributes => attrs, :limit => limit
+            base: search_options[:base],
+            scope: scope,
+            filter: search_options[:filter],
+            attributes: search_options[:attributes],
+            size: search_options[:limit],
+            paged_searcheds_supported: search_options[:paged_results_supported],
           }
           execute(:search, info, args) do |entry|
             attributes = {}
@@ -119,9 +124,6 @@ module ActiveLdap
 
       def modify_rdn(dn, new_rdn, delete_old_rdn, new_superior, options={})
         super do |_dn, _new_rdn, _delete_old_rdn, _new_superior|
-          if _new_superior
-            raise NotImplemented.new(_("modify RDN with new superior"))
-          end
           info = {
             :name => "modify: RDN",
             :dn => _dn,
@@ -132,7 +134,8 @@ module ActiveLdap
           execute(:rename, info,
                   :olddn => _dn,
                   :newrdn => _new_rdn,
-                  :delete_attributes => _delete_old_rdn)
+                  :delete_attributes => _delete_old_rdn,
+                  :new_superior => _new_superior)
         end
       end
 
@@ -142,14 +145,23 @@ module ActiveLdap
         result = log(name, info) do
           begin
             @connection.send(method, *args, &block)
-          rescue Errno::EPIPE
-            raise ConnectionError, "#{$!.class}: #{$!.message}"
+          rescue SystemCallError => error
+            message = "#{error.class}: #{error.message}"
+            raise ConnectionError, message, caller(0) + error.backtrace
+          rescue Net::LDAP::ResponseMissingOrInvalidError => error
+            message = "#{error.class}: #{error.message}"
+            message << ": connection may be timed out"
+            raise ConnectionError, message, caller(0) + error.backtrace
           end
         end
         message = nil
-        if result.is_a?(Hash)
+        case result
+        when Hash
           message = result[:errorMessage]
           result = result[:resultCode]
+        when Net::LDAP::PDU
+          message = result.error_message
+          result = result.result_code
         end
         unless result.success?
           klass = LdapError::ERRORS[result]

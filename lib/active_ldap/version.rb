@@ -1,3 +1,3 @@
 module ActiveLdap
-  VERSION = "3.2.2"
+  VERSION = "6.1.1"
 end

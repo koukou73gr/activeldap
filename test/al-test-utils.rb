@@ -23,6 +23,7 @@ module AlTestUtils
       include TemporaryEntry
       include CommandSupport
       include MockLogger
+      include Omittable
     end
   end
 
@@ -39,7 +40,13 @@ module AlTestUtils
       @top_dir = File.expand_path(File.join(@base_dir, ".."))
       @example_dir = File.join(@top_dir, "examples")
       @fixtures_dir = File.join(@base_dir, "fixtures")
-      @config_file = File.join(@base_dir, "config.yaml")
+      current_config_file = File.expand_path("config.yaml")
+      test_config_file = File.join(@base_dir, "config.yaml")
+      if File.exist?(current_config_file)
+        @config_file = current_config_file
+      else
+        @config_file = test_config_file
+      end
       ActiveLdap::Base.configurations = read_config
     end
 
@@ -82,7 +89,7 @@ module AlTestUtils
     @@certificate = nil
     def certificate
       return @@certificate if @@certificate
-      if File.exists?(certificate_path)
+      if File.exist?(certificate_path)
         @@certificate = read_binary_file(certificate_path)
         return @@certificate
       end
@@ -175,6 +182,7 @@ module AlTestUtils
       populate_ou
       populate_user_class
       populate_group_class
+      populate_group_of_urls_class
       populate_associations
     end
 
@@ -208,7 +216,7 @@ module AlTestUtils
     end
 
     def populate_ou
-      %w(Users Groups).each do |name|
+      %w(Users Groups GroupOfURLsSet).each do |name|
         make_ou(name)
       end
     end
@@ -237,6 +245,14 @@ module AlTestUtils
                                 :scope => :sub,
                                 :classes => ["posixGroup"]
       assign_class_name(@group_class, "Group")
+    end
+
+    def populate_group_of_urls_class
+      @group_of_urls_class = Class.new(ActiveLdap::Base)
+      @group_of_urls_class.ldap_mapping :prefix => "ou=GroupOfURLsSet",
+                                        :scope => :sub,
+                                        :classes => ["groupOfURLs"]
+      assign_class_name(@group_of_urls_class, "GroupOfURLs")
     end
 
     def populate_associations
@@ -273,41 +289,70 @@ module AlTestUtils
       super
       @user_index = 0
       @group_index = 0
+      @group_of_urls_index = 0
+      @temporary_uids = []
+    end
+
+    def teardown
+      @temporary_uids.each do |uid|
+        delete_temporary_user(uid)
+      end
+      super
+    end
+
+    def delete_temporary_user(uid)
+      return unless @user_class.exists?(uid)
+      @user_class.search(:value => uid) do |dn, attribute|
+        @user_class.remove_connection(dn)
+        @user_class.delete(dn)
+      end
+    end
+
+    def build_temporary_user(config={})
+      uid = config[:uid] || "temp-user#{@user_index}"
+      password = config[:password] || "password#{@user_index}"
+      uid_number = config[:uid_number] || default_uid
+      gid_number = config[:gid_number] || default_gid
+      home_directory = config[:home_directory] || "/nonexistent"
+      see_also = config[:see_also]
+      user = nil
+      _wrap_assertion do
+        assert(!@user_class.exists?(uid))
+        assert_raise(ActiveLdap::EntryNotFound) do
+          @user_class.find(uid).dn
+        end
+        user = @user_class.new(uid)
+        assert(user.new_entry?)
+        user.cn = user.uid
+        user.sn = user.uid
+        user.uid_number = uid_number
+        user.gid_number = gid_number
+        user.home_directory = home_directory
+        user.user_password = ActiveLdap::UserPassword.ssha(password)
+        user.see_also = see_also
+        unless config[:simple]
+          user.add_class('shadowAccount', 'inetOrgPerson',
+                         'organizationalPerson')
+          user.user_certificate = certificate
+          user.jpeg_photo = jpeg_photo
+        end
+        user.save
+        assert(!user.new_entry?)
+      end
+      [@user_class.find(user.uid), password]
     end
 
     def make_temporary_user(config={})
       @user_index += 1
-      uid = config[:uid] || "temp-user#{@user_index}"
-      ensure_delete_user(uid) do
-        password = config[:password] || "password#{@user_index}"
-        uid_number = config[:uid_number] || default_uid
-        gid_number = config[:gid_number] || default_gid
-        home_directory = config[:home_directory] || "/nonexistent"
-        see_also = config[:see_also]
-        _wrap_assertion do
-          assert(!@user_class.exists?(uid))
-          assert_raise(ActiveLdap::EntryNotFound) do
-            @user_class.find(uid).dn
-          end
-          user = @user_class.new(uid)
-          assert(user.new_entry?)
-          user.cn = user.uid
-          user.sn = user.uid
-          user.uid_number = uid_number
-          user.gid_number = gid_number
-          user.home_directory = home_directory
-          user.user_password = ActiveLdap::UserPassword.ssha(password)
-          user.see_also = see_also
-          unless config[:simple]
-            user.add_class('shadowAccount', 'inetOrgPerson',
-                           'organizationalPerson')
-            user.user_certificate = certificate
-            user.jpeg_photo = jpeg_photo
-          end
-          user.save
-          assert(!user.new_entry?)
-          yield(@user_class.find(user.uid), password)
+      config = config.merge(uid: config[:uid] || "temp-user#{@user_index}")
+      uid = config[:uid]
+      @temporary_uids << uid
+      if block_given?
+        ensure_delete_user(uid) do
+          yield(*build_temporary_user(config))
         end
+      else
+        build_temporary_user(config)
       end
     end
 
@@ -331,21 +376,42 @@ module AlTestUtils
       end
     end
 
+    def make_temporary_group_of_urls(config={})
+      @group_of_urls_index += 1
+      cn = config[:cn] || "temp-group-of-urls-#{@group_of_urls_index}"
+      ensure_delete_group_of_urls(cn) do
+        _wrap_assertion do
+          assert(!@group_of_urls_class.exists?(cn))
+          assert_raise(ActiveLdap::EntryNotFound) do
+            @group_of_urls_class.find(cn)
+          end
+          group_of_urls = @group_of_urls_class.new(cn)
+          assert(group_of_urls.new_entry?)
+          group_of_urls.member_url = config[:member_url]
+          assert(group_of_urls.save!)
+          assert(!group_of_urls.new_entry?)
+          yield(@group_of_urls_class.find(group_of_urls.cn))
+        end
+      end
+    end
+
     def ensure_delete_user(uid)
       yield(uid)
     ensure
-      if @user_class.exists?(uid)
-        @user_class.search(:value => uid) do |dn, attribute|
-          @user_class.remove_connection(dn)
-          @user_class.delete(dn)
-        end
-      end
+      delete_temporary_user(uid)
+      @temporary_uids.delete(uid)
     end
 
     def ensure_delete_group(cn)
       yield(cn)
     ensure
       @group_class.delete(cn) if @group_class.exists?(cn)
+    end
+
+    def ensure_delete_group_of_urls(cn)
+      yield(cn)
+    ensure
+      @group_of_urls_class.delete(cn) if @group_of_urls_class.exists?(cn)
     end
 
     def default_uid
@@ -373,6 +439,10 @@ module AlTestUtils
     end
 
     def run_command(*args, &block)
+      if RUBY_VERSION >= "2.7"
+        omit("Need to fix an optional arguments warning in net-ldap: " +
+            "ruby-ldap/ruby-net-ldap/pull/342")
+      end
       file = Tempfile.new("al-command-support")
       file.open
       file.puts(ActiveLdap::Base.configurations["test"].to_yaml)
@@ -423,6 +493,23 @@ module AlTestUtils
       yield(mock_logger)
     ensure
       ActiveLdap::Base.logger = original_logger
+    end
+  end
+
+  module Omittable
+    def omit_if_jruby(message=nil)
+      return unless RUBY_PLATFORM == "java"
+      omit(message || "This test is not for JRuby")
+    end
+
+    def omit_unless_jruby(message=nil)
+      return if RUBY_PLATFORM == "java"
+      omit(message || "This test is only for JRuby")
+    end
+
+    def omit_if_ldap(message=nil)
+      return if current_configuration[:adapter] == "ldap"
+      omit(message || "This test is not for ruby-ldap")
     end
   end
 end

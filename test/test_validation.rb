@@ -5,30 +5,78 @@ class TestValidation < Test::Unit::TestCase
   include AlTestUtils
   include ActiveLdap::Helper
 
+  class TestAttributeMethod < self
+    priority :must
+
+    priority :normal
+    def test_symbol
+      assert_true(@user_class.attribute_method?(:cn))
+    end
+
+    def test_string
+      assert_true(@user_class.attribute_method?("cn"))
+    end
+
+    def test_upper_case
+      assert_true(@user_class.attribute_method?(:CN))
+    end
+
+    def test_mixed_case
+      assert_true(@user_class.attribute_method?(:Cn))
+    end
+
+    def test_snake_case
+      assert_true(@user_class.attribute_method?(:common_name))
+    end
+
+    def test_full_name
+      assert_true(@user_class.attribute_method?(:commonName))
+    end
+  end
+
   priority :must
+
+  priority :normal
+  def test_validate_false
+    make_temporary_user(:simple => true) do |user,|
+      user.sn = nil
+      assert_raise(ActiveLdap::RequiredAttributeMissed) do
+        user.save(validate: false)
+      end
+    end
+  end
+
+  def test_octet_string
+    make_temporary_user(:simple => true) do |user,|
+      utf8_encoded_binary_value = "\xff".force_encoding("UTF-8")
+      user.user_password = utf8_encoded_binary_value
+      assert_true(user.save)
+      assert_equal([], user.errors.full_messages)
+    end
+  end
+
   def test_rename_duplicated
     make_temporary_user(:simple => true) do |user1,|
       make_temporary_user(:simple => true) do |user2,|
         user1.id = user2.id
         assert_false(user1.save)
 
-        format = la_('distinguishedName').humanize
-        format  << ' ' << _("is duplicated: %s")
+        format = human_attribute_name("distinguishedName")
+        format << " " << _("is duplicated: %s")
         assert_equal([format % [user2.dn.to_s]],
                      user1.errors.full_messages)
       end
     end
   end
 
-  priority :normal
   def test_not_show_binary_value
     make_temporary_user do |user,|
       user.user_certificate = nil
       user.jpeg_photo = "XXX"
       assert_not_predicate(user, :save)
 
-      format = la_('jpegPhoto').humanize
-      format << ' '  << _("has invalid format: %s: required syntax: %s: %s")
+      format = human_attribute_name('jpegPhoto')
+      format << " "  << _("has invalid format: %s: required syntax: %s: %s")
       arguments = [_("<binary-value>"),
                    lsd_("1.3.6.1.4.1.1466.115.121.1.28"),
                    _("invalid JPEG format")]
@@ -73,8 +121,8 @@ class TestValidation < Test::Unit::TestCase
     reason = _("attribute value is missing")
     invalid_format = _("%s is invalid distinguished name (DN): %s")
     invalid_message = invalid_format % ["uid==,#{user.class.base}", reason]
-    format = la_('distinguishedName').humanize
-    format << ' ' << _("is invalid: %s")
+    format = human_attribute_name("distinguishedName")
+    format << " " << _("is invalid: %s")
     message = format % invalid_message
     assert_equal([message],
                  user.errors.full_messages.find_all {|m| /DN/ =~ m})
@@ -87,8 +135,8 @@ class TestValidation < Test::Unit::TestCase
       reason = _("attribute value is missing")
       invalid_format = _("%s is invalid distinguished name (DN): %s")
       invalid_message = invalid_format % ["uid==,#{user.class.base}", reason]
-      format = la_('distinguishedName').humanize
-      format << ' ' << _("is invalid: %s")
+      format = human_attribute_name("distinguishedName")
+      format << " " << _("is invalid: %s")
       message = format % invalid_message
       assert_equal([message], user.errors.full_messages)
     end
@@ -99,8 +147,8 @@ class TestValidation < Test::Unit::TestCase
       assert(user.valid?)
       user.uid_number = ""
       assert(!user.valid?)
-      format = la_('uidNumber').humanize
-      format << ' ' << _("is required attribute by objectClass '%s'")
+      format = human_attribute_name("uidNumber")
+      format << " " << _("is required attribute by objectClass '%s'")
       blank_message = format % loc_("posixAccount")
       assert_equal([blank_message], user.errors.full_messages)
     end
@@ -111,8 +159,8 @@ class TestValidation < Test::Unit::TestCase
       assert(user.save)
       user.class.excluded_classes = ['person']
       assert(!user.save)
-      format = la_("objectClass").humanize
-      format << ' ' << n_("has excluded value: %s",
+      format = human_attribute_name("objectClass")
+      format << " " << n_("has excluded value: %s",
                           "has excluded values: %s",
                           1)
       message = format % loc_("person")
@@ -183,8 +231,8 @@ class TestValidation < Test::Unit::TestCase
     assert(ou_class.new("YYY").save)
     ou = ou_class.new("YYY")
     assert(!ou.save)
-    format = la_("distinguishedName").humanize
-    format << ' ' << _("is duplicated: %s")
+    format = human_attribute_name("distinguishedName")
+    format << " " << _("is duplicated: %s")
     message = format % ou.dn
     assert_equal([message], ou.errors.full_messages)
   end
@@ -220,12 +268,16 @@ class TestValidation < Test::Unit::TestCase
   end
 
   private
+  def human_attribute_name(name)
+    la_(name).dup
+  end
+
   def assert_invalid_value(name, formatted_value, syntax, reason, model, option)
     syntax_description = lsd_(syntax)
     assert_not_nil(syntax_description)
     params = [formatted_value, syntax_description, reason]
     params.unshift(option) if option
-    localized_name = la_(name).humanize
+    localized_name = human_attribute_name(name)
     format = localized_name << ' '
     if option
       format << _("(%s) has invalid format: %s: required syntax: %s: %s")

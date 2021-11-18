@@ -1,3 +1,5 @@
+require "English"
+require "cgi"
 require 'uri'
 begin
   require 'uri/ldaps'
@@ -25,6 +27,7 @@ module ActiveLdap
     DEFAULT_CONFIG[:host] = '127.0.0.1'
     DEFAULT_CONFIG[:port] = nil
     DEFAULT_CONFIG[:method] = :plain  # :ssl, :tls, :plain allowed
+    DEFAULT_CONFIG[:tls_options] = nil
 
     DEFAULT_CONFIG[:bind_dn] = nil
     DEFAULT_CONFIG[:password_block] = nil
@@ -43,6 +46,16 @@ module ActiveLdap
     DEFAULT_CONFIG[:timeout] = 0 # in seconds; 0 <= Never timeout
     # Whether or not to retry on timeouts
     DEFAULT_CONFIG[:retry_on_timeout] = true
+    DEFAULT_CONFIG[:follow_referrals] = true
+
+    # 500 is the default size limit value of OpenLDAP 2.4:
+    #   https://openldap.org/doc/admin24/limits.html#Global%20Limits
+    #
+    # We may change this when we find LDAP server that its the default
+    # size limit is smaller than 500.
+    DEFAULT_CONFIG[:page_size] = 500
+    # Whether using paged results if available.
+    DEFAULT_CONFIG[:use_paged_results] = true
 
     DEFAULT_CONFIG[:logger] = nil
 
@@ -88,19 +101,33 @@ module ActiveLdap
         @@defined_configurations
       end
 
-      def remove_configuration_by_configuration(config)
-        @@defined_configurations.delete_if {|key, value| value == config}
+      def remove_configuration_by_key(key)
+        @@defined_configurations.delete(key)
       end
 
       CONNECTION_CONFIGURATION_KEYS = [:uri, :base, :adapter]
       def remove_connection_related_configuration(config)
         config.reject do |key, value|
           CONNECTION_CONFIGURATION_KEYS.include?(key)
-	end
+        end
+      end
+
+      def parent_configuration(target)
+        if target.is_a?(Base)
+          target = target.class
+        else
+          target = target.superclass
+        end
+        while target <= Base
+          config = defined_configurations[target.active_connection_key]
+          return config if config
+          target = target.superclass
+        end
+        default_configuration
       end
 
       def merge_configuration(user_configuration, target=self)
-        configuration = default_configuration
+        configuration = parent_configuration(target).dup
         prepare_configuration(user_configuration).each do |key, value|
           case key
           when :base
@@ -135,12 +162,49 @@ module ActiveLdap
           raise ConfigurationError.new(_("not a LDAP URI: %s") % uri.to_s)
         end
 
-        uri_configuration = {:port => uri.port}
-        uri_configuration[:host] = uri.host if uri.host
-        uri_configuration[:bind_dn] = uri.dn if uri.dn
-        uri_configuration[:scope] = uri.scope if uri.scope
-        uri_configuration[:method] = :ssl if uri.is_a?(URI::LDAPS)
-        uri_configuration.merge(configuration)
+        merger = URIConfigurationMerger.new(uri)
+        merger.merge(configuration)
+      end
+
+      class URIConfigurationMerger
+        def initialize(uri)
+          @uri = uri
+        end
+
+        def merge(configuration)
+          uri_configuration = {:port => @uri.port}
+          uri_configuration[:host] = @uri.host if @uri.host
+          uri_configuration[:base] = @uri.dn if @uri.dn
+          extensions = parse_extensions
+          bindname_extension = extensions["bindname"]
+          if bindname_extension
+            uri_configuration[:bind_dn] = bindname_extension[:value]
+            uri_configuration[:allow_anonymous] = !bindname_extension[:critical]
+          end
+          uri_configuration[:scope] = @uri.scope if @uri.scope
+          uri_configuration[:method] = :ssl if @uri.is_a?(URI::LDAPS)
+          uri_configuration.merge(configuration)
+        end
+
+        private
+        def parse_extensions
+          extensions = {}
+          (@uri.extensions || "").split(",").collect do |extension|
+            name, value = extension.split("=", 2)
+            case name
+            when /\A!/
+              critical = true
+              name = $POSTMATCH
+            else
+              critical = false
+            end
+            extensions[name] = {
+              :critical => critical,
+              :value => CGI.unescape(value || ""),
+            }
+          end
+          extensions
+        end
       end
     end
   end

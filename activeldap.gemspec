@@ -15,11 +15,10 @@ Gem::Specification.new do |spec|
 
   spec.name = 'activeldap'
   spec.version = ActiveLdap::VERSION.dup
-  spec.rubyforge_project = 'ruby-activeldap'
   spec.authors = ['Will Drewry', 'Kouhei Sutou']
   spec.email = ['redpig@dataspill.org', 'kou@cozmixng.org']
   spec.summary = 'ActiveLdap is a object-oriented API to LDAP'
-  spec.homepage = 'http://ruby-activeldap.rubyforge.org/'
+  spec.homepage = 'http://activeldap.github.io/'
   spec.files = collect_files.call("lib/**/*",
                                   "{benchmark,examples,po}/**/*",
                                   "bin/*",
@@ -41,17 +40,18 @@ Gem::Specification.new do |spec|
     ActiveRecord, but it is still trivial to define new objects and manipulate
     them with minimal difficulty.
   EOF
-  spec.license = "Ruby's or GPLv2 or later"
+  spec.licenses = ["Ruby's", "GPLv2 or later"]
 
-  spec.add_dependency("activemodel", ["~> 3.2.8"])
+  spec.add_dependency("activemodel", [">= 5.2"])
   spec.add_dependency("locale")
   spec.add_dependency("gettext")
   spec.add_dependency("gettext_i18n_rails")
+  spec.add_dependency("builder")
 
   spec.add_development_dependency("bundler")
+  spec.add_development_dependency("kramdown")
+  spec.add_development_dependency("packnga")
   spec.add_development_dependency("rake")
   spec.add_development_dependency("test-unit")
-  spec.add_development_dependency("test-unit-notify")
   spec.add_development_dependency("yard")
-  spec.add_development_dependency("RedCloth")
 end

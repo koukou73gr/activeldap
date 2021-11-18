@@ -6,7 +6,7 @@ module ActiveLdap
 
     module ClassMethods
       @@active_connections = {}
-      @@allow_concurrency = false
+      @@allow_concurrency = true
 
       def thread_safe_active_connections
         @@active_connections[Thread.current.object_id] ||= {}
@@ -55,7 +55,7 @@ module ActiveLdap
       def clear_active_connection_name
         @active_connection_name = nil
         ObjectSpace.each_object(Class) do |klass|
-          if klass < self and !klass.name.blank?
+          if klass < self and !klass.name.blank? and !klass.frozen?
             klass.instance_variable_set("@active_connection_name", nil)
           end
         end
@@ -135,7 +135,7 @@ module ActiveLdap
         end
         config = configuration(key)
         conn = active_connections[key]
-        remove_configuration_by_configuration(config)
+        remove_configuration_by_key(key)
         active_connections.delete_if {|_key, value| value == conn}
         conn.disconnect! if conn
         config
@@ -165,18 +165,11 @@ module ActiveLdap
         connection.schema
       end
 
-      def reset_runtime
-        active_connections.inject(0) do |result, (name, connection)|
-          _ = name # for suppress a warning on Ruby 1.9.3
-          result + connection.reset_runtime
-        end
-      end
-
-      private
       def active_connection_key(k=self)
         k.name.blank? ? k.object_id : k.name
       end
 
+      private
       def determine_active_connection_name
         key = active_connection_key
         if active_connections[key] or configuration(key)
@@ -204,26 +197,8 @@ module ActiveLdap
         if Object.respond_to?(:java)
           "jndi"
         else
-          ruby_ldap_available = false
-          $LOAD_PATH.each do |path|
-            if File.exist?(File.join(path, "ldap", "ldif.rb"))
-              ruby_ldap_available = true
-              break
-            end
-          end
-          if !ruby_ldap_available and Object.const_defined?(:Gem)
-            ruby_ldap_available = gem_available?("ruby-ldap")
-          end
-          if ruby_ldap_available
-            "ldap"
-          else
-            "net-ldap"
-          end
+          "net-ldap"
         end
-      end
-
-      def gem_available?(name)
-        not Gem::Specification.find_all_by_name(name).empty?
       end
     end
 

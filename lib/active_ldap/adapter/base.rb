@@ -1,44 +1,58 @@
-require 'benchmark'
+require 'timeout'
 
 require 'active_ldap/schema'
 require 'active_ldap/entry_attribute'
 require 'active_ldap/ldap_error'
+require 'active_ldap/supported_control'
 
 module ActiveLdap
   module Adapter
     class Base
       include GetTextSupport
 
-      VALID_ADAPTER_CONFIGURATION_KEYS = [:host, :port, :method, :timeout,
-                                          :retry_on_timeout, :retry_limit,
-                                          :retry_wait, :bind_dn, :password,
-                                          :password_block, :try_sasl,
-                                          :sasl_mechanisms, :sasl_quiet,
-                                          :allow_anonymous, :store_password,
-                                          :scope, :sasl_options]
+      VALID_ADAPTER_CONFIGURATION_KEYS = [
+        :host,
+        :port,
+        :method,
+        :tls_options,
+        :timeout,
+        :retry_on_timeout,
+        :retry_limit,
+        :retry_wait,
+        :bind_dn,
+        :password,
+        :password_block,
+        :try_sasl,
+        :sasl_mechanisms,
+        :sasl_quiet,
+        :allow_anonymous,
+        :store_password,
+        :scope,
+        :sasl_options,
+        :follow_referrals,
+        :use_paged_results,
+        :page_size,
+      ]
 
       @@row_even = true
 
-      attr_reader :runtime
       def initialize(configuration={})
-        @runtime = 0
         @connection = nil
         @disconnected = false
         @bound = false
         @bind_tried = false
         @entry_attributes = {}
+        @follow_referrals = nil
+        @page_size = nil
         @configuration = configuration.dup
         @logger = @configuration.delete(:logger)
         @configuration.assert_valid_keys(VALID_ADAPTER_CONFIGURATION_KEYS)
         VALID_ADAPTER_CONFIGURATION_KEYS.each do |name|
           instance_variable_set("@#{name}", configuration[name])
         end
+        @follow_referrals = true if @follow_referrals.nil?
+        @page_size ||= Configuration::DEFAULT_CONFIG[:page_size]
         @instrumenter = ActiveSupport::Notifications.instrumenter
-      end
-
-      def reset_runtime
-        runtime, @runtime = @runtime, 0
-        runtime
       end
 
       def connect(options={})
@@ -148,29 +162,51 @@ module ActiveLdap
         root_dse_values('namingContexts')
       end
 
+      def supported_control
+        @supported_control ||=
+          SupportedControl.new(root_dse_values("supportedControl"))
+      end
+
       def entry_attribute(object_classes)
         @entry_attributes[object_classes.uniq.sort] ||=
           EntryAttribute.new(schema, object_classes)
       end
 
       def search(options={})
-        filter = parse_filter(options[:filter]) || 'objectClass=*'
-        attrs = options[:attributes] || []
-        scope = ensure_scope(options[:scope] || @scope)
         base = options[:base]
+        base = ensure_dn_string(base)
+        attributes = options[:attributes] || []
+        attributes = attributes.to_a # just in case
         limit = options[:limit] || 0
         limit = nil if limit <= 0
+        use_paged_results = options[:use_paged_results]
+        use_paged_results = @use_paged_results if use_paged_results.nil?
+        if use_paged_results
+          use_paged_results = limit != 1 && supported_control.paged_results?
+        end
+        search_options = {
+          base: base,
+          scope: ensure_scope(options[:scope] || @scope),
+          filter: parse_filter(options[:filter]) || 'objectClass=*',
+          attributes: attributes,
+          limit: limit,
+          use_paged_results: use_paged_results,
+          page_size: options[:page_size] || @page_size,
+        }
 
-        attrs = attrs.to_a # just in case
-        base = ensure_dn_string(base)
         begin
           operation(options) do
-            yield(base, scope, filter, attrs, limit)
+            yield(search_options)
           end
-        rescue LdapError::NoSuchObject, LdapError::InvalidDnSyntax
+        rescue LdapError::NoSuchObject, LdapError::InvalidDnSyntax => error
           # Do nothing on failure
           @logger.info do
-            args = [$!.class, $!.message, filter, attrs.inspect]
+            args = [
+              error.class.class,
+              error.message,
+              search_options[:filter],
+              search_options[:attributes].inspect,
+            ]
             _("Ignore error %s(%s): filter %s: attributes: %s") % args
           end
         end
@@ -240,19 +276,21 @@ module ActiveLdap
         end
       end
 
-      def log_info(name, runtime_in_seconds, info=nil)
-        return unless @logger
-        return unless @logger.debug?
-        message = "LDAP: #{name} (#{'%.1f' % (runtime_in_seconds * 1000)}ms)"
-        @logger.debug(format_log_entry(message, info))
-      end
-
       private
       def ensure_port(method)
         if method == :ssl
           URI::LDAPS::DEFAULT_PORT
         else
           URI::LDAP::DEFAULT_PORT
+        end
+      end
+
+      def follow_referrals?(options={})
+        option_follow_referrals = options[:follow_referrals]
+        if option_follow_referrals.nil?
+          @follow_referrals
+        else
+          option_follow_referrals
         end
       end
 
@@ -314,10 +352,11 @@ module ActiveLdap
         n_retries = 0
         retry_limit = options[:retry_limit] || @retry_limit
         begin
-          do_in_timeout(@timeout, &block)
+          Timeout.timeout(@timeout, &block)
         rescue Timeout::Error => e
           @logger.error {_('Requested action timed out.')}
-          if @retry_on_timeout and retry_limit < 0 and n_retries <= retry_limit
+          if @retry_on_timeout and (retry_limit < 0 or n_retries <= retry_limit)
+            n_retries += 1
             if connecting?
               retry
             elsif try_reconnect
@@ -329,14 +368,10 @@ module ActiveLdap
         end
       end
 
-      def do_in_timeout(timeout, &block)
-        Timeout.alarm(timeout, &block)
-      end
-
       def sasl_bind(bind_dn, options={})
         # Get all SASL mechanisms
         mechanisms = operation(options) do
-          root_dse_values("supportedSASLMechanisms")
+          root_dse_values("supportedSASLMechanisms", options)
         end
 
         if options.has_key?(:sasl_quiet)
@@ -579,15 +614,20 @@ module ActiveLdap
           options[:reconnect_attempts] = 0 if force
           options[:reconnect_attempts] += 1 if retry_limit >= 0
           begin
+            options[:try_reconnect] = false
             connect(options)
             break
-          rescue AuthenticationError
+          rescue AuthenticationError, Timeout::Error
             raise
           rescue => detail
             @logger.error do
-              _("Reconnect to server failed: %s\n" \
+              _("Reconnect to server failed: %s: %s\n" \
                 "Reconnect to server failed backtrace:\n" \
-                "%s") % [detail.exception, detail.backtrace.join("\n")]
+                "%s") % [
+                detail.class,
+                detail.message,
+                detail.backtrace.join("\n"),
+              ]
             end
             # Do not loop if forced
             raise ConnectionError, detail.message if force
@@ -633,10 +673,17 @@ module ActiveLdap
 
       def root_dse(attrs, options={})
         found_attributes = nil
+        if options.has_key?(:try_reconnect)
+           try_reconnect = options[:try_reconnect]
+        else
+           try_reconnect = true
+        end
+
         search(:base => "",
                :scope => :base,
                :attributes => attrs,
-               :limit => 1) do |dn, attributes|
+               :limit => 1,
+               :try_reconnect => try_reconnect) do |dn, attributes|
           found_attributes = attributes
         end
         found_attributes
@@ -657,42 +704,15 @@ module ActiveLdap
       end
 
       def log(name, info=nil)
-        if block_given?
-          result = nil
-          @instrumenter.instrument(
-            "log_info.active_ldap",
-            :info => info,
-            :name => name) { result = yield }
-          result
-        else
-          log_info(name, 0, info)
-          nil
+        result = nil
+        payload = {
+          :name => name,
+          :info => info || {},
+        }
+        @instrumenter.instrument("log_info.active_ldap", payload) do
+          result = yield if block_given?
         end
-      rescue Exception
-        log_info("#{name}: FAILED", 0,
-                 (info || {}).merge(:error => $!.class.name,
-                                    :error_message => $!.message))
-        raise
-      end
-
-      def format_log_entry(message, info=nil)
-        if ActiveLdap::Base.colorize_logging
-          if @@row_even
-            message_color, dump_color = "4;36;1", "0;1"
-          else
-            @@row_even = true
-            message_color, dump_color = "4;35;1", "0"
-          end
-          @@row_even = !@@row_even
-
-          log_entry = "  \e[#{message_color}m#{message}\e[0m"
-          log_entry << ": \e[#{dump_color}m#{info.inspect}\e[0m" if info
-          log_entry
-        else
-          log_entry = message
-          log_entry += ": #{info.inspect}" if info
-          log_entry
-        end
+        result
       end
 
       def ensure_dn_string(dn)
